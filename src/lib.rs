@@ -159,11 +159,48 @@ pub fn parse_central_dir<T: Read+Seek>(eocd: &EndOfCentralDirectory, data: &mut 
     let crc32 = data.read_u32::<LittleEndian>()?;
     let compressed_size = data.read_u32::<LittleEndian>()?;
     let uncompressed_size = data.read_u32::<LittleEndian>()?;
-    // The lenghts are stored here
+    // The lengths are stored here but the data is at the end of the structure.
     let fname_len = data.read_u16::<LittleEndian>()? as usize;
     let extra_len = data.read_u16::<LittleEndian>()? as usize;
     let comment_len = data.read_u16::<LittleEndian>()? as usize;
+    let disk_number_start = data.read_u16::<LittleEndian>()?;
+    let internal_file_attributes = data.read_u16::<LittleEndian>()?;
+    let external_file_attributes = data.read_u32::<LittleEndian>()?;
+    let relative_offset_of_local_header = data.read_u32::<LittleEndian>()?;
+    let filename = {
+        let mut buf = vec![0u8; fname_len];
+        data.read_exact(&mut buf)?;
+        OsStr::from_bytes(&buf).to_os_string()
+    };
+    let extra_field = {
+        let mut buf = vec![0u8; extra_len];
+        data.read_exact(&mut buf)?;
+        buf
+    };
+    let file_comment = {
+        let mut buf = vec![0u8; comment_len];
+        data.read_exact(&mut buf)?;
+        buf
+    };
 
+    Ok(CentralDirectory {
+        version_made_by,
+        version_needed_to_extract,
+        flags,
+        compression,
+        last_mod_time,
+        last_mod_date,
+        crc32,
+        compressed_size,
+        uncompressed_size,
+        filename,
+        extra_field,
+        file_comment,
+        disk_number_start,
+        internal_file_attributes,
+        external_file_attributes,
+        relative_offset_of_local_header,
+    })
 }
 
 #[cfg(test)]
