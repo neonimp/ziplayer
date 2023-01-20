@@ -16,16 +16,60 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::structures::{CentralDirectory, EndOfCentralDirectory, LocalFileHeader, ZipEntry};
-use crate::{Result, ZipError, CD_SIG, EOCD_SIG, LFH_SIG};
-use byteorder::{LittleEndian, ReadBytesExt};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufReader, Read, Seek, SeekFrom};
 #[cfg(not(target_os = "windows"))]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
+
+use byteorder::{LittleEndian, ReadBytesExt};
+
+use crate::{CD_SIG, EOCD_SIG, LFH_SIG, Result, ZipError};
+use crate::compression_codecs::CompressionCodec;
+use crate::structures::{CentralDirectory, EndOfCentralDirectory, LocalFileHeader, ZipEntry};
+
+
+pub struct ZipReader<R: Read + Seek> {
+    reader: BufReader<R>,
+    index: BTreeMap<OsString, CentralDirectory>,
+}
+
+pub struct ZipeEntryInfo {
+    pub name: OsString,
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub is_symlink: bool,
+    pub is_compressed: bool,
+    pub size: u64,
+    pub compressed_size: u64,
+    pub crc32: u32,
+    pub compression_method: u16,
+    pub last_modified: u32,
+    pub last_accessed: u32,
+    pub comment: Option<OsString>,
+}
+
+impl ZipeEntryInfo {
+    pub(crate) fn from_CD(entry: &CentralDirectory) -> Self {
+        ZipeEntryInfo {
+            name: entry.filename.clone(),
+            is_dir: entry.external_file_attributes & 0x10 == 0x10,
+            is_file: entry.external_file_attributes & 0x20 == 0x20,
+            is_symlink: entry.external_file_attributes & 0x40000000 == 0x40000000,
+            is_compressed: entry.compression != 0,
+            size: entry.uncompressed_size as u64,
+            compressed_size: entry.compressed_size as u64,
+            crc32: entry.crc32,
+            compression_method: entry.compression,
+            last_modified: entry.last_mod_date as u32,
+            last_accessed: entry.last_mod_date as u32,
+            comment: None,
+        }
+    }
+    
+}
 
 fn find_next_signature<R: Read + Seek>(
     reader: &mut R,
@@ -57,7 +101,7 @@ fn find_next_signature<R: Read + Seek>(
     }
 }
 
-pub fn find_eocd<T: Read + Seek>(data: &mut BufReader<T>) -> Result<EndOfCentralDirectory> {
+fn find_eocd<T: Read + Seek>(data: &mut BufReader<T>) -> Result<EndOfCentralDirectory> {
     let sig_candidate;
     let eocd: Option<EndOfCentralDirectory>;
 
@@ -86,7 +130,7 @@ pub fn find_eocd<T: Read + Seek>(data: &mut BufReader<T>) -> Result<EndOfCentral
 }
 
 /// Using an eocd, parse the central directory.
-pub fn parse_central_dir<T: Read + Seek>(
+fn parse_central_dir<T: Read + Seek>(
     data: &mut BufReader<T>,
     offset: u64,
 ) -> Result<CentralDirectory> {
@@ -158,7 +202,7 @@ pub fn parse_central_dir<T: Read + Seek>(
 
 /// Parse a local file header.
 /// the offset is relative to the start of the file.
-pub fn parse_header<T: Read + Seek>(
+fn parse_header<T: Read + Seek>(
     data: &mut BufReader<T>,
     offset: u64,
 ) -> Result<LocalFileHeader> {
@@ -174,7 +218,7 @@ pub fn parse_header<T: Read + Seek>(
                 Err(ZipError::InvalidEntry(offset))
             } else {
                 Err(ZipError::IOError(e))
-            }
+            };
         }
     };
 
@@ -230,8 +274,8 @@ pub fn parse_header<T: Read + Seek>(
 pub fn index_archive<R: Read + Seek>(
     reader: &mut BufReader<R>,
     hint: Option<u64>,
-) -> Result<HashMap<OsString, CentralDirectory>> {
-    let mut index = HashMap::new();
+) -> Result<BTreeMap<OsString, CentralDirectory>> {
+    let mut index = BTreeMap::new();
     let mut hint = hint.unwrap_or(0);
 
     reader.seek(SeekFrom::Start(0))?;
@@ -261,12 +305,12 @@ pub fn index_archive<R: Read + Seek>(
 /// not rely on unwrapping the result.
 ///
 /// This method MUST ONLY be used as a last resort.
-/// 
-/// 
+///
+///
 pub fn intensive_index_archive<R: Read + Seek>(
     reader: &mut BufReader<R>,
-) -> Result<HashMap<OsString, ZipEntry>> {
-    let mut lh_index = HashMap::new();
+) -> Result<BTreeMap<OsString, ZipEntry>> {
+    let mut lh_index = BTreeMap::new();
     let cd_index;
 
     reader.seek(SeekFrom::Start(0))?;
@@ -293,7 +337,7 @@ pub fn intensive_index_archive<R: Read + Seek>(
     }
 
     // Now we have two indexes, we need to merge them.
-    let mut index = HashMap::new();
+    let mut index = BTreeMap::new();
     for (filename, cd_header) in cd_index {
         index.insert(filename.clone(), ZipEntry::CentralDirectory(cd_header));
     }
@@ -320,4 +364,47 @@ pub fn dump_file<T: Read + Seek>(
     data.seek(SeekFrom::Start(header.data_offset))?;
     data.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+impl<R: Read + Seek> ZipReader<R> {
+    /// Read and index a ZIP archive.
+    pub fn new(reader: R) -> Result<ZipReader<R>> {
+        let mut reader = BufReader::new(reader);
+        let eocd = find_eocd(&mut reader)?;
+
+        let index = index_archive(&mut reader,
+                                  Some(eocd.offset_of_start_of_central_directory as u64))?;
+
+
+        Ok(ZipReader {
+            reader,
+            index,
+        })
+    }
+
+    /// Dump a file from the archive, without decompressing it.
+    pub fn dump_file(&mut self, filename: &OsStr) -> Result<Vec<u8>> {
+        let entry = self.index.get(filename)
+            .ok_or(ZipError::EntryNotFound(filename.to_string_lossy().to_string()))?;
+        dump_file(&mut self.reader, entry)
+    }
+
+    /// Get the index of the archive.
+    pub fn index(&self) -> &BTreeMap<OsString, CentralDirectory> {
+        &self.index
+    }
+
+    pub fn file_info(&self, filename: &OsStr) -> Result<ZipeEntryInfo> {
+        let entry = self.index.get(filename)
+            .ok_or(ZipError::EntryNotFound(filename.to_string_lossy().to_string()))?;
+        Ok(ZipeEntryInfo::from_CD(&entry))
+    }
+
+    /// Decompress a file from the archive.
+    pub fn decompress_file(&mut self, filename: &OsStr, codec: &mut impl CompressionCodec) -> Result<Vec<u8>> {
+        let entry = self.index.get(filename)
+            .ok_or(ZipError::EntryNotFound(filename.to_string_lossy().to_string()))?;
+        let data = dump_file(&mut self.reader, entry)?;
+        codec.expand(&data)
+    }
 }

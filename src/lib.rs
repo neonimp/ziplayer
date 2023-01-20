@@ -22,7 +22,9 @@ use std::fs::File;
 use thiserror::Error;
 
 pub mod structures;
-pub mod read;
+pub mod compression_codecs;
+pub mod reader;
+pub mod writer;
 
 pub const EOCD_SIG: u32 = 0x06054b50;
 pub const EOCD64_SIG: u32 = 0x06064b50;
@@ -36,10 +38,14 @@ pub enum ZipError {
     IOError(#[from] std::io::Error),
     #[error("Invalid signature: {0}")]
     InvalidSignature(u32),
+    #[error("Entry not found: {0}")]
+    EntryNotFound(String),
     #[error("Invalid zip file")]
     EndOfCentralDirectoryNotFound,
     #[error("Invalid entry in archive at offset {0}")]
     InvalidEntry(u64),
+    #[error("Invalid compression method: {0}")]
+    InvalidCompressionMethod(u16),
     #[error("Fatal Error: {0}, {1}")]
     UnknownError(u64, String),
 }
