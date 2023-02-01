@@ -30,7 +30,7 @@ pub struct LocalFileHeader {
     pub crc32: u32,
     pub compressed_size: u32,
     pub uncompressed_size: u32,
-    pub filename: OsString,
+    pub filename: String,
     pub extra_field: Vec<u8>,
     pub data_offset: u64,
 }
@@ -58,7 +58,7 @@ pub struct CentralDirectory {
     pub crc32: u32,
     pub compressed_size: u32,
     pub uncompressed_size: u32,
-    pub filename: OsString,
+    pub filename: String,
     pub extra_field: Vec<u8>,
     pub file_comment: Vec<u8>,
     pub disk_number_start: u16,

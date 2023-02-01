@@ -30,14 +30,15 @@ use crate::{CD_SIG, EOCD_SIG, LFH_SIG, Result, ZipError};
 use crate::compression_codecs::CompressionCodec;
 use crate::structures::{CentralDirectory, EndOfCentralDirectory, LocalFileHeader, ZipEntry};
 
+pub type ZipIndex = BTreeMap<String, CentralDirectory>;
 
 pub struct ZipReader<R: Read + Seek> {
     reader: BufReader<R>,
-    index: BTreeMap<OsString, CentralDirectory>,
+    index: ZipIndex,
 }
 
 pub struct ZipeEntryInfo {
-    pub name: OsString,
+    pub name: String,
     pub is_dir: bool,
     pub is_file: bool,
     pub is_symlink: bool,
@@ -162,7 +163,13 @@ fn parse_central_dir<T: Read + Seek>(
     let filename = {
         let mut buf = vec![0u8; fname_len];
         data.read_exact(&mut buf)?;
-        OsStr::from_bytes(&buf).to_os_string()
+        #[cfg(unix)]{
+            String::from_utf8_lossy(&buf).to_string()
+        }
+        #[cfg(windows)]{
+            // TODO: try to use utf-16 to decode the filename if utf-8 fails
+            String::from_utf8_lossy(&*buf).to_string()
+        }
     };
     let extra_field = {
         let mut buf = vec![0u8; extra_len];
@@ -243,7 +250,13 @@ fn parse_header<T: Read + Seek>(
         let filename = {
             let mut buf = vec![0u8; fname_len];
             data.read_exact(&mut buf)?;
-            OsStr::from_bytes(&buf).to_os_string()
+            #[cfg(unix)]{
+                String::from_utf8_lossy(&buf).to_string()
+            }
+            #[cfg(windows)]{
+                // TODO: try to use utf-16 to decode the filename if utf-8 fails
+                String::from_utf8_lossy(&*buf).to_string()
+            }
         };
         let extra_field = {
             let mut buf = vec![0u8; extra_len];
@@ -274,7 +287,7 @@ fn parse_header<T: Read + Seek>(
 pub fn index_archive<R: Read + Seek>(
     reader: &mut BufReader<R>,
     hint: Option<u64>,
-) -> Result<BTreeMap<OsString, CentralDirectory>> {
+) -> Result<ZipIndex> {
     let mut index = BTreeMap::new();
     let mut hint = hint.unwrap_or(0);
 
@@ -309,7 +322,7 @@ pub fn index_archive<R: Read + Seek>(
 ///
 pub fn intensive_index_archive<R: Read + Seek>(
     reader: &mut BufReader<R>,
-) -> Result<BTreeMap<OsString, ZipEntry>> {
+) -> Result<BTreeMap<String, ZipEntry>> {
     let mut lh_index = BTreeMap::new();
     let cd_index;
 
@@ -383,27 +396,27 @@ impl<R: Read + Seek> ZipReader<R> {
     }
 
     /// Dump a file from the archive, without decompressing it.
-    pub fn dump_file(&mut self, filename: &OsStr) -> Result<Vec<u8>> {
+    pub fn dump_file(&mut self, filename: &str) -> Result<Vec<u8>> {
         let entry = self.index.get(filename)
-            .ok_or(ZipError::EntryNotFound(filename.to_string_lossy().to_string()))?;
+            .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
         dump_file(&mut self.reader, entry)
     }
 
     /// Get the index of the archive.
-    pub fn index(&self) -> &BTreeMap<OsString, CentralDirectory> {
+    pub fn index(&self) -> &ZipIndex {
         &self.index
     }
 
-    pub fn file_info(&self, filename: &OsStr) -> Result<ZipeEntryInfo> {
+    pub fn file_info(&self, filename: &str) -> Result<ZipeEntryInfo> {
         let entry = self.index.get(filename)
-            .ok_or(ZipError::EntryNotFound(filename.to_string_lossy().to_string()))?;
+            .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
         Ok(ZipeEntryInfo::from_CD(&entry))
     }
 
     /// Decompress a file from the archive.
-    pub fn decompress_file(&mut self, filename: &OsStr, codec: &mut impl CompressionCodec) -> Result<Vec<u8>> {
+    pub fn decompress_file(&mut self, filename: &str, codec: &mut impl CompressionCodec) -> Result<Vec<u8>> {
         let entry = self.index.get(filename)
-            .ok_or(ZipError::EntryNotFound(filename.to_string_lossy().to_string()))?;
+            .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
         let data = dump_file(&mut self.reader, entry)?;
         codec.expand(&data)
     }
