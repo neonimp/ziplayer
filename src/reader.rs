@@ -53,7 +53,7 @@ pub struct ZipeEntryInfo {
 }
 
 impl ZipeEntryInfo {
-    pub(crate) fn from_CD(entry: &CentralDirectory) -> Self {
+    pub(crate) fn from_central_dir(entry: &CentralDirectory) -> Self {
         ZipeEntryInfo {
             name: entry.filename.clone(),
             is_dir: entry.external_file_attributes & 0x10 == 0x10,
@@ -69,7 +69,6 @@ impl ZipeEntryInfo {
             comment: None,
         }
     }
-    
 }
 
 fn find_next_signature<R: Read + Seek>(
@@ -369,11 +368,11 @@ pub fn intensive_index_archive<R: Read + Seek>(
 /// Dump the file as it's stored in the zip file.
 pub fn dump_file<T: Read + Seek>(
     data: &mut BufReader<T>,
-    file: &CentralDirectory,
+    CentralDirectory { relative_offset_of_local_header, compressed_size, .. }: &CentralDirectory,
 ) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; file.compressed_size as usize];
-    data.seek(SeekFrom::Start(file.relative_offset_of_local_header as u64))?;
-    let header = parse_header(data, file.relative_offset_of_local_header as u64)?;
+    let mut buf = vec![0u8; *compressed_size as usize];
+    data.seek(SeekFrom::Start(*relative_offset_of_local_header as u64))?;
+    let header = parse_header(data, *relative_offset_of_local_header as u64)?;
     data.seek(SeekFrom::Start(header.data_offset))?;
     data.read_exact(&mut buf)?;
     Ok(buf)
@@ -410,13 +409,16 @@ impl<R: Read + Seek> ZipReader<R> {
     pub fn file_info(&self, filename: &str) -> Result<ZipeEntryInfo> {
         let entry = self.index.get(filename)
             .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
-        Ok(ZipeEntryInfo::from_CD(&entry))
+        Ok(ZipeEntryInfo::from_central_dir(&entry))
     }
 
     /// Decompress a file from the archive.
     pub fn decompress_file(&mut self, filename: &str, codec: &mut impl CompressionCodec) -> Result<Vec<u8>> {
         let entry = self.index.get(filename)
             .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
+        if entry.compression != codec.int_id() {
+            return Err(ZipError::MismatchedCompressionMethod(entry.compression, codec.int_id()));
+        }
         let data = dump_file(&mut self.reader, entry)?;
         codec.expand(&data)
     }

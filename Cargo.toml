@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Matheus Xavier <mxavier@neonimp.com>"]
 description = "Pure Rust implementation of the ZIP file format"
-license = "LGPL-3.0-or-later"
+license = "LGPL-3.0-linking-exception"
+keywords = ["zip", "compression", "archive", "archiver"]
+repository = "https://github.com/neonimp/ziplayer"
+
 
 [profile.release]
 strip = true
@@ -16,3 +19,8 @@ lto = true
 thiserror = "1.0.36"
 byteorder = "1.4.3"
 crc = "3.0.0"
+libc = "0.2.139"
+
+[features]
+default = ["ffi"]
+ffi =[]

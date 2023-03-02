@@ -25,6 +25,8 @@ pub mod structures;
 pub mod compression_codecs;
 pub mod reader;
 pub mod writer;
+#[cfg(feature = "ffi")]
+pub mod ffi_interface;
 
 pub const EOCD_SIG: u32 = 0x06054b50;
 pub const EOCD64_SIG: u32 = 0x06064b50;
@@ -46,6 +48,10 @@ pub enum ZipError {
     InvalidEntry(u64),
     #[error("Invalid compression method: {0}")]
     InvalidCompressionMethod(u16),
+    #[error("Mismatched compression method: {0} expected, {1} found")]
+    MismatchedCompressionMethod(u16, u16),
+    #[error("Invalid compression level: {0}")]
+    InvalidCompressionLevel(u8),
     #[error("Fatal Error: {0}, {1}")]
     UnknownError(u64, String),
 }

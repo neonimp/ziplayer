@@ -22,10 +22,8 @@ use crate::structures::{CentralDirectory, EndOfCentralDirectory, LocalFileHeader
 use std::collections::BTreeMap;
 use std::io::Write;
 
-pub struct ZipWriter<'a, W: Write> {
-    writer: &'a mut W,
+pub struct ZipWriter<'writer, W: Write> {
+    writer: &'writer mut W,
     entries: BTreeMap<String, ZipEntry>,
     cd: CentralDirectory,
 }
-
-
