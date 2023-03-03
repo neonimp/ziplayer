@@ -26,7 +26,7 @@ pub mod compression_codecs;
 pub mod reader;
 pub mod writer;
 #[cfg(feature = "ffi")]
-pub mod ffi_interface;
+pub mod ffi;
 
 pub const EOCD_SIG: u32 = 0x06054b50;
 pub const EOCD64_SIG: u32 = 0x06064b50;

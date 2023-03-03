@@ -16,8 +16,6 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::ffi::OsString;
-
 /// Describes a file in the zip archive.
 #[derive(Debug, Clone)]
 pub struct LocalFileHeader {

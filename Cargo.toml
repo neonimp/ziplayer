@@ -8,6 +8,8 @@ license = "LGPL-3.0-linking-exception"
 keywords = ["zip", "compression", "archive", "archiver"]
 repository = "https://github.com/neonimp/ziplayer"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 strip = true

@@ -37,7 +37,7 @@ pub struct ZipReader<R: Read + Seek> {
     index: ZipIndex,
 }
 
-pub struct ZipeEntryInfo {
+pub struct ZipEntryInfo {
     pub name: String,
     pub is_dir: bool,
     pub is_file: bool,
@@ -50,11 +50,12 @@ pub struct ZipeEntryInfo {
     pub last_modified: u32,
     pub last_accessed: u32,
     pub comment: Option<OsString>,
+    pub offset: u64,
 }
 
-impl ZipeEntryInfo {
+impl ZipEntryInfo {
     pub(crate) fn from_central_dir(entry: &CentralDirectory) -> Self {
-        ZipeEntryInfo {
+        ZipEntryInfo {
             name: entry.filename.clone(),
             is_dir: entry.external_file_attributes & 0x10 == 0x10,
             is_file: entry.external_file_attributes & 0x20 == 0x20,
@@ -66,6 +67,7 @@ impl ZipeEntryInfo {
             compression_method: entry.compression,
             last_modified: entry.last_mod_date as u32,
             last_accessed: entry.last_mod_date as u32,
+            offset: entry.relative_offset_of_local_header as u64,
             comment: None,
         }
     }
@@ -228,7 +230,7 @@ fn parse_header<T: Read + Seek>(
         }
     };
 
-    if sig_candidate == LFH_SIG {
+    return if sig_candidate == LFH_SIG {
         let offset = data.stream_position()? - 4;
         let version = data.read_u16::<LittleEndian>()?;
         let flags = data.read_u16::<LittleEndian>()?;
@@ -264,7 +266,7 @@ fn parse_header<T: Read + Seek>(
         };
         let data_offset = data.stream_position()?;
 
-        return Ok(LocalFileHeader {
+        Ok(LocalFileHeader {
             offset,
             version,
             flags,
@@ -277,10 +279,10 @@ fn parse_header<T: Read + Seek>(
             filename,
             extra_field,
             data_offset,
-        });
+        })
     } else {
-        return Err(ZipError::InvalidSignature(sig_candidate));
-    }
+        Err(ZipError::InvalidSignature(sig_candidate))
+    };
 }
 
 pub fn index_archive<R: Read + Seek>(
@@ -406,10 +408,10 @@ impl<R: Read + Seek> ZipReader<R> {
         &self.index
     }
 
-    pub fn file_info(&self, filename: &str) -> Result<ZipeEntryInfo> {
+    pub fn file_info(&self, filename: &str) -> Result<ZipEntryInfo> {
         let entry = self.index.get(filename)
             .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
-        Ok(ZipeEntryInfo::from_central_dir(&entry))
+        Ok(ZipEntryInfo::from_central_dir(&entry))
     }
 
     /// Decompress a file from the archive.
