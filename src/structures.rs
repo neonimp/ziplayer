@@ -16,6 +16,8 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use std::path::PathBuf;
+
 /// Describes a file in the zip archive.
 #[derive(Debug, Clone)]
 pub struct LocalFileHeader {
@@ -28,7 +30,7 @@ pub struct LocalFileHeader {
     pub crc32: u32,
     pub compressed_size: u32,
     pub uncompressed_size: u32,
-    pub filename: String,
+    pub filename: PathBuf,
     pub extra_field: Vec<u8>,
     pub data_offset: u64,
 }
@@ -56,13 +58,13 @@ pub struct CentralDirectory {
     pub crc32: u32,
     pub compressed_size: u32,
     pub uncompressed_size: u32,
-    pub filename: String,
+    pub filename: PathBuf,
     pub extra_field: Vec<u8>,
     pub file_comment: Vec<u8>,
     pub disk_number_start: u16,
     pub internal_file_attributes: u16,
     pub external_file_attributes: u32,
-    pub relative_offset_of_local_header: u32,
+    pub local_header_rel_offset: u32,
     pub is_directory: bool,
     pub len: u64,
 }

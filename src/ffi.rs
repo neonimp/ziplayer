@@ -20,12 +20,15 @@
 //! the functions are exported as C symbols and can be used from C/C++.
 //! this is an inherently unsafe module, as it is interfacing with C code.
 
-use std::fs::File;
-use libc::{size_t, c_uchar, c_char};
-use std::io::{Seek, Cursor, BufReader, Read};
-use std::mem::size_of;
+
+use std::io::{Cursor};
+
 use std::ptr::{null, null_mut};
-use crate::reader::ZipReader;
+
+use libc::{c_char, c_uchar, size_t};
+
+use crate::reader::{ZipEntryInfo, ZipReader};
+
 use crate::ZipError;
 
 #[repr(C)]
@@ -71,7 +74,7 @@ pub unsafe extern "C" fn zip_open_buffer(buf: &mut c_uchar, buf_len: size_t) -> 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn zip_find_file(reader: *mut IZipReader, filename: *const c_uchar, filename_len: size_t) -> *mut IZipEntry {
+pub unsafe extern "C" fn zip_find_file(reader: *mut IZipReader, filename: *const c_uchar, filename_len: size_t) -> *mut ZipEntryInfo {
     let reader = if !reader.is_null() {
         &mut *reader
     } else { return null_mut(); };
@@ -83,17 +86,8 @@ pub unsafe extern "C" fn zip_find_file(reader: *mut IZipReader, filename: *const
     let filename = std::str::from_utf8(filename).unwrap();
 
     if let Some(reader) = &mut reader.reader {
-        let finfo = reader.file_info(filename).unwrap();
-        let entry = Box::new(IZipEntry {
-            filename: finfo.name.as_ptr(),
-            filename_len: finfo.name.len(),
-            compressed_size: finfo.compressed_size,
-            uncompressed_size: finfo.size,
-            crc32: finfo.crc32,
-            is_dir: finfo.is_dir,
-            offset: finfo.offset,
-        });
-        Box::leak(entry)
+        let finfo = Box::new(reader.file_info(filename).unwrap());
+        Box::leak(finfo)
     } else { null_mut() }
 }
 

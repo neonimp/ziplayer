@@ -16,8 +16,8 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::{CD_SIG, EOCD_SIG, LFH_SIG, Result, ZipError};
-use crate::structures::{CentralDirectory, EndOfCentralDirectory, LocalFileHeader, ZipEntry};
+
+use crate::structures::{CentralDirectory, ZipEntry};
 
 use std::collections::BTreeMap;
 use std::io::Write;

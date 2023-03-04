@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
+use std::path::PathBuf;
 use thiserror::Error;
 
 pub mod structures;
@@ -27,6 +28,7 @@ pub mod reader;
 pub mod writer;
 #[cfg(feature = "ffi")]
 pub mod ffi;
+pub mod codecs;
 
 pub const EOCD_SIG: u32 = 0x06054b50;
 pub const EOCD64_SIG: u32 = 0x06064b50;
@@ -41,7 +43,7 @@ pub enum ZipError {
     #[error("Invalid signature: {0}")]
     InvalidSignature(u32),
     #[error("Entry not found: {0}")]
-    EntryNotFound(String),
+    EntryNotFound(PathBuf),
     #[error("Invalid zip file")]
     EndOfCentralDirectoryNotFound,
     #[error("Invalid entry in archive at offset {0}")]
@@ -51,7 +53,9 @@ pub enum ZipError {
     #[error("Mismatched compression method: {0} expected, {1} found")]
     MismatchedCompressionMethod(u16, u16),
     #[error("Invalid compression level: {0}")]
-    InvalidCompressionLevel(u8),
+    InvalidCompressionLevel(i32),
+    #[error("Invalid UTF-8 string: {0}")]
+    InvalidUtf8String(#[from] std::string::FromUtf8Error),
     #[error("Fatal Error: {0}, {1}")]
     UnknownError(u64, String),
 }
@@ -79,5 +83,5 @@ pub struct ZipObject {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 }

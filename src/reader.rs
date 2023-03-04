@@ -16,21 +16,19 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
-use std::io::{BufReader, Read, Seek, SeekFrom};
-#[cfg(not(target_os = "windows"))]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(target_os = "windows")]
-use std::os::windows::ffi::OsStrExt;
-
+use std::collections::{BTreeMap};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use byteorder::{LittleEndian, ReadBytesExt};
+#[cfg(feature = "multi-thread")]
+use rayon::prelude::*;
 
 use crate::{CD_SIG, EOCD_SIG, LFH_SIG, Result, ZipError};
 use crate::compression_codecs::CompressionCodec;
 use crate::structures::{CentralDirectory, EndOfCentralDirectory, LocalFileHeader, ZipEntry};
 
-pub type ZipIndex = BTreeMap<String, CentralDirectory>;
+pub type ZipIndex = BTreeMap<PathBuf, CentralDirectory>;
 
 pub struct ZipReader<R: Read + Seek> {
     reader: BufReader<R>,
@@ -38,7 +36,7 @@ pub struct ZipReader<R: Read + Seek> {
 }
 
 pub struct ZipEntryInfo {
-    pub name: String,
+    pub name: PathBuf,
     pub is_dir: bool,
     pub is_file: bool,
     pub is_symlink: bool,
@@ -49,7 +47,7 @@ pub struct ZipEntryInfo {
     pub compression_method: u16,
     pub last_modified: u32,
     pub last_accessed: u32,
-    pub comment: Option<OsString>,
+    pub comment: Option<String>,
     pub offset: u64,
 }
 
@@ -67,7 +65,7 @@ impl ZipEntryInfo {
             compression_method: entry.compression,
             last_modified: entry.last_mod_date as u32,
             last_accessed: entry.last_mod_date as u32,
-            offset: entry.relative_offset_of_local_header as u64,
+            offset: entry.local_header_rel_offset as u64,
             comment: None,
         }
     }
@@ -164,13 +162,7 @@ fn parse_central_dir<T: Read + Seek>(
     let filename = {
         let mut buf = vec![0u8; fname_len];
         data.read_exact(&mut buf)?;
-        #[cfg(unix)]{
-            String::from_utf8_lossy(&buf).to_string()
-        }
-        #[cfg(windows)]{
-            // TODO: try to use utf-16 to decode the filename if utf-8 fails
-            String::from_utf8_lossy(&*buf).to_string()
-        }
+        PathBuf::from(String::from_utf8(buf)?)
     };
     let extra_field = {
         let mut buf = vec![0u8; extra_len];
@@ -202,7 +194,7 @@ fn parse_central_dir<T: Read + Seek>(
         disk_number_start,
         internal_file_attributes,
         external_file_attributes,
-        relative_offset_of_local_header,
+        local_header_rel_offset: relative_offset_of_local_header,
         is_directory,
         len,
     })
@@ -251,13 +243,7 @@ fn parse_header<T: Read + Seek>(
         let filename = {
             let mut buf = vec![0u8; fname_len];
             data.read_exact(&mut buf)?;
-            #[cfg(unix)]{
-                String::from_utf8_lossy(&buf).to_string()
-            }
-            #[cfg(windows)]{
-                // TODO: try to use utf-16 to decode the filename if utf-8 fails
-                String::from_utf8_lossy(&*buf).to_string()
-            }
+            PathBuf::from(String::from_utf8(buf)?)
         };
         let extra_field = {
             let mut buf = vec![0u8; extra_len];
@@ -323,7 +309,7 @@ pub fn index_archive<R: Read + Seek>(
 ///
 pub fn intensive_index_archive<R: Read + Seek>(
     reader: &mut BufReader<R>,
-) -> Result<BTreeMap<String, ZipEntry>> {
+) -> Result<BTreeMap<PathBuf, ZipEntry>> {
     let mut lh_index = BTreeMap::new();
     let cd_index;
 
@@ -370,7 +356,7 @@ pub fn intensive_index_archive<R: Read + Seek>(
 /// Dump the file as it's stored in the zip file.
 pub fn dump_file<T: Read + Seek>(
     data: &mut BufReader<T>,
-    CentralDirectory { relative_offset_of_local_header, compressed_size, .. }: &CentralDirectory,
+    CentralDirectory { local_header_rel_offset: relative_offset_of_local_header, compressed_size, .. }: &CentralDirectory,
 ) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; *compressed_size as usize];
     data.seek(SeekFrom::Start(*relative_offset_of_local_header as u64))?;
@@ -378,6 +364,15 @@ pub fn dump_file<T: Read + Seek>(
     data.seek(SeekFrom::Start(header.data_offset))?;
     data.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// Get the local file header for a file from a central directory entry.
+pub fn get_local_file_header<T: Read + Seek>(
+    data: &mut BufReader<T>,
+    CentralDirectory { local_header_rel_offset: relative_offset_of_local_header, .. }: &CentralDirectory,
+) -> Result<LocalFileHeader> {
+    data.seek(SeekFrom::Start(*relative_offset_of_local_header as u64))?;
+    parse_header(data, *relative_offset_of_local_header as u64)
 }
 
 impl<R: Read + Seek> ZipReader<R> {
@@ -397,9 +392,9 @@ impl<R: Read + Seek> ZipReader<R> {
     }
 
     /// Dump a file from the archive, without decompressing it.
-    pub fn dump_file(&mut self, filename: &str) -> Result<Vec<u8>> {
-        let entry = self.index.get(filename)
-            .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
+    pub fn dump_file<T: AsRef<Path>>(&mut self, filename: &T) -> Result<Vec<u8>> {
+        let entry = self.index.get(filename.as_ref())
+            .ok_or(ZipError::EntryNotFound(filename.as_ref().into()))?;
         dump_file(&mut self.reader, entry)
     }
 
@@ -408,20 +403,59 @@ impl<R: Read + Seek> ZipReader<R> {
         &self.index
     }
 
-    pub fn file_info(&self, filename: &str) -> Result<ZipEntryInfo> {
-        let entry = self.index.get(filename)
-            .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
+    pub fn file_info<T: AsRef<Path>>(&self, filename: &T) -> Result<ZipEntryInfo> {
+        let entry = self.index.get(filename.as_ref())
+            .ok_or(ZipError::EntryNotFound(filename.as_ref().into()))?;
         Ok(ZipEntryInfo::from_central_dir(&entry))
     }
 
-    /// Decompress a file from the archive.
-    pub fn decompress_file(&mut self, filename: &str, codec: &mut impl CompressionCodec) -> Result<Vec<u8>> {
-        let entry = self.index.get(filename)
-            .ok_or(ZipError::EntryNotFound(filename.to_string()))?;
+    /// Extract a file from the archive.
+    pub fn extract_file<T: AsRef<Path>>(&mut self, filename: &T, codec: &mut impl CompressionCodec) -> Result<Vec<u8>> {
+        let entry = self.index.get(filename.as_ref())
+            .ok_or(ZipError::EntryNotFound(filename.as_ref().into()))?;
         if entry.compression != codec.int_id() {
             return Err(ZipError::MismatchedCompressionMethod(entry.compression, codec.int_id()));
         }
         let data = dump_file(&mut self.reader, entry)?;
         codec.expand(&data)
+    }
+
+
+    /// Extract the files to the given directory.
+    pub fn extract_files<T: AsRef<Path>>(&mut self, files: &[T], dir: &T, codec: &mut impl CompressionCodec) -> Result<()> {
+        let mut central_dirs = Vec::with_capacity(files.len());
+        let mut dir = dir.clone().as_ref().to_owned();
+        for file in files {
+            let cd = self.index.get(file.as_ref())
+                .ok_or(ZipError::EntryNotFound(file.as_ref().into()))?;
+            central_dirs.push(cd);
+        }
+
+        #[cfg(not(feature = "multi-thread"))]
+        for cd in central_dirs.iter() {
+            let data_raw = dump_file(&mut self.reader, cd)?;
+            let data = codec.expand(&data_raw)?;
+            let mut path = dir.clone();
+            path.push(cd.filename.clone());
+            let mut file = File::create(path)?;
+            file.write_all(&data)?;
+        }
+
+        #[cfg(feature = "multi-thread")]
+        {
+            let slices = central_dirs.iter().map(|cd| {
+                dump_file(&mut self.reader, cd)
+            }).collect::<Result<Vec<Vec<u8>>>>()?;
+
+            slices.into_par_iter().zip(central_dirs).for_each(|(data_raw, cd)| {
+                let data = codec.expand(&data_raw).unwrap();
+                let mut path = dir.clone();
+                path.push(cd.filename.clone());
+                let mut file = File::create(path).unwrap();
+                file.write_all(&data).unwrap();
+            });
+        }
+
+        Ok(())
     }
 }

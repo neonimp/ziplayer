@@ -1,14 +1,29 @@
-
-
+use std::io::{BufRead, Read, Write};
 use crate::Result;
+
+pub type MemoryStream<'stream> = (&'stream Vec<u8>, usize);
 
 /// Trait for valid compression codecs.
 /// Compression codecs are used to compress and decompress data.
-pub trait CompressionCodec {
+pub trait CompressionCodec: Sync + Send {
     /// Returns the int identifier for the compression codec.
     fn int_id(&self) -> u16;
-    fn compress(&self, data: &[u8]) -> Result<Vec<u8>>;
-    fn expand(&self, data: &[u8]) -> Result<Vec<u8>>;
+    fn compress(&self, data: MemoryStream) -> Result<Vec<u8>>;
+    fn expand(&self, data: MemoryStream) -> Result<Vec<u8>>;
+
+    fn compress_to_writer(&self, data: MemoryStream, writer: &mut dyn Write) -> Result<()> {
+        let compressed = self.compress(data)?;
+        writer.write_all(&compressed)?;
+        Ok(())
+    }
+
+    fn expand_from_reader(&self, reader: &mut dyn Read) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        self.expand((&buf, buf.len()))
+    }
+
+    fn streamed_expansion(&self, reader: &mut impl BufRead, writer: &mut impl Write);
 }
 
 /// No compression codec.
@@ -20,11 +35,15 @@ impl CompressionCodec for NoCompressionCodec {
         0
     }
 
-    fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        Ok(data.to_vec())
+    fn compress(&self, data: MemoryStream) -> Result<Vec<u8>> {
+        Ok(data.0.to_vec())
     }
 
-    fn expand(&self, data: &[u8]) -> Result<Vec<u8>> {
-        Ok(data.to_vec())
+    fn expand(&self, data: MemoryStream) -> Result<Vec<u8>> {
+        Ok(data.0.to_vec())
+    }
+
+    fn streamed_expansion(&self, reader: &mut impl BufRead, writer: &mut impl Write) {
+        std::io::copy(reader, writer).unwrap();
     }
 }
