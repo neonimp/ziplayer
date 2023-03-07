@@ -20,7 +20,8 @@ use std::collections::{BTreeMap};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use byteorder::{LittleEndian, ReadBytesExt};
+use neoncore::int_util::Endianness::LittleEndian;
+use neoncore::int_util::StreamReadInt;
 #[cfg(feature = "multi-thread")]
 use rayon::prelude::*;
 
@@ -102,30 +103,29 @@ fn find_next_signature<R: Read + Seek>(
 }
 
 fn find_eocd<T: Read + Seek>(data: &mut BufReader<T>) -> Result<EndOfCentralDirectory> {
-    let sig_candidate;
     let eocd: Option<EndOfCentralDirectory>;
 
     let offset = find_next_signature(data, EOCD_SIG, None)?;
     data.seek(SeekFrom::Start(offset))?;
-    sig_candidate = data.read_u32::<LittleEndian>()?;
+    let sig_candidate = data.read_u32(LittleEndian)?;
 
     if sig_candidate == EOCD_SIG {
         eocd = Some(EndOfCentralDirectory {
-            disk_number: data.read_u16::<LittleEndian>()?,
-            disk_with_central_directory: data.read_u16::<LittleEndian>()?,
-            number_of_central_directory_records_on_this_disk: data.read_u16::<LittleEndian>()?,
-            total_number_of_central_directory_records: data.read_u16::<LittleEndian>()?,
-            size_of_central_directory: data.read_u32::<LittleEndian>()?,
-            offset_of_start_of_central_directory: data.read_u32::<LittleEndian>()?,
+            disk_number: data.read_u16(LittleEndian)?,
+            disk_with_central_directory: data.read_u16(LittleEndian)?,
+            number_of_central_directory_records_on_this_disk: data.read_u16(LittleEndian)?,
+            total_number_of_central_directory_records: data.read_u16(LittleEndian)?,
+            size_of_central_directory: data.read_u32(LittleEndian)?,
+            offset_of_start_of_central_directory: data.read_u32(LittleEndian)?,
             zip_file_comment: {
-                let mut buf = vec![0u8; data.read_u16::<LittleEndian>()? as usize];
+                let mut buf = vec![0u8; data.read_u16(LittleEndian)? as usize];
                 data.read_exact(&mut buf)?;
                 buf
             },
         });
-        return Ok(eocd.unwrap());
+        Ok(eocd.unwrap())
     } else {
-        return Err(ZipError::EndOfCentralDirectoryNotFound);
+        Err(ZipError::EndOfCentralDirectoryNotFound)
     }
 }
 
@@ -134,31 +134,29 @@ fn parse_central_dir<T: Read + Seek>(
     data: &mut BufReader<T>,
     offset: u64,
 ) -> Result<CentralDirectory> {
-    let sig_candidate;
-
     data.seek(SeekFrom::Start(offset))?;
-    sig_candidate = data.read_u32::<LittleEndian>()?;
+    let sig_candidate = data.read_u32(LittleEndian)?;
     if sig_candidate != CD_SIG {
         return Err(ZipError::InvalidSignature(sig_candidate));
     }
 
-    let version_made_by = data.read_u16::<LittleEndian>()?;
-    let version_needed_to_extract = data.read_u16::<LittleEndian>()?;
-    let flags = data.read_u16::<LittleEndian>()?;
-    let compression = data.read_u16::<LittleEndian>()?;
-    let last_mod_time = data.read_u16::<LittleEndian>()?;
-    let last_mod_date = data.read_u16::<LittleEndian>()?;
-    let crc32 = data.read_u32::<LittleEndian>()?;
-    let compressed_size = data.read_u32::<LittleEndian>()?;
-    let uncompressed_size = data.read_u32::<LittleEndian>()?;
+    let version_made_by = data.read_u16(LittleEndian)?;
+    let version_needed_to_extract = data.read_u16(LittleEndian)?;
+    let flags = data.read_u16(LittleEndian)?;
+    let compression = data.read_u16(LittleEndian)?;
+    let last_mod_time = data.read_u16(LittleEndian)?;
+    let last_mod_date = data.read_u16(LittleEndian)?;
+    let crc32 = data.read_u32(LittleEndian)?;
+    let compressed_size = data.read_u32(LittleEndian)?;
+    let uncompressed_size = data.read_u32(LittleEndian)?;
     // The lengths are stored here but the data is at the end of the structure.
-    let fname_len = data.read_u16::<LittleEndian>()? as usize;
-    let extra_len = data.read_u16::<LittleEndian>()? as usize;
-    let comment_len = data.read_u16::<LittleEndian>()? as usize;
-    let disk_number_start = data.read_u16::<LittleEndian>()?;
-    let internal_file_attributes = data.read_u16::<LittleEndian>()?;
-    let external_file_attributes = data.read_u32::<LittleEndian>()?;
-    let relative_offset_of_local_header = data.read_u32::<LittleEndian>()?;
+    let fname_len = data.read_u16(LittleEndian)? as usize;
+    let extra_len = data.read_u16(LittleEndian)? as usize;
+    let comment_len = data.read_u16(LittleEndian)? as usize;
+    let disk_number_start = data.read_u16(LittleEndian)?;
+    let internal_file_attributes = data.read_u16(LittleEndian)?;
+    let external_file_attributes = data.read_u32(LittleEndian)?;
+    let relative_offset_of_local_header = data.read_u32(LittleEndian)?;
     let filename = {
         let mut buf = vec![0u8; fname_len];
         data.read_exact(&mut buf)?;
@@ -206,12 +204,10 @@ fn parse_header<T: Read + Seek>(
     data: &mut BufReader<T>,
     offset: u64,
 ) -> Result<LocalFileHeader> {
-    let sig_candidate;
-
     // Rewind the reader
     data.seek(SeekFrom::Start(offset))?;
 
-    sig_candidate = match data.read_u32::<LittleEndian>() {
+    let sig_candidate = match data.read_u32(LittleEndian) {
         Ok(sig) => sig,
         Err(e) => {
             return if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -222,24 +218,24 @@ fn parse_header<T: Read + Seek>(
         }
     };
 
-    return if sig_candidate == LFH_SIG {
+    if sig_candidate == LFH_SIG {
         let offset = data.stream_position()? - 4;
-        let version = data.read_u16::<LittleEndian>()?;
-        let flags = data.read_u16::<LittleEndian>()?;
-        let compression = data.read_u16::<LittleEndian>()?;
-        let last_mod_time = data.read_u16::<LittleEndian>()?;
-        let last_mod_date = data.read_u16::<LittleEndian>()?;
+        let version = data.read_u16(LittleEndian)?;
+        let flags = data.read_u16(LittleEndian)?;
+        let compression = data.read_u16(LittleEndian)?;
+        let last_mod_time = data.read_u16(LittleEndian)?;
+        let last_mod_date = data.read_u16(LittleEndian)?;
         let mut crc32 = !0;
         let mut compressed_size = !0;
         let mut uncompressed_size = !0;
         // Do we need to look for the data descriptor?
         if flags & 1 << 3 == 0 {
-            crc32 = data.read_u32::<LittleEndian>()?;
-            compressed_size = data.read_u32::<LittleEndian>()?;
-            uncompressed_size = data.read_u32::<LittleEndian>()?;
+            crc32 = data.read_u32(LittleEndian)?;
+            compressed_size = data.read_u32(LittleEndian)?;
+            uncompressed_size = data.read_u32(LittleEndian)?;
         }
-        let fname_len = data.read_u16::<LittleEndian>()? as usize;
-        let extra_len = data.read_u16::<LittleEndian>()? as usize;
+        let fname_len = data.read_u16(LittleEndian)? as usize;
+        let extra_len = data.read_u16(LittleEndian)? as usize;
         let filename = {
             let mut buf = vec![0u8; fname_len];
             data.read_exact(&mut buf)?;
@@ -268,7 +264,7 @@ fn parse_header<T: Read + Seek>(
         })
     } else {
         Err(ZipError::InvalidSignature(sig_candidate))
-    };
+    }
 }
 
 pub fn index_archive<R: Read + Seek>(
@@ -278,22 +274,22 @@ pub fn index_archive<R: Read + Seek>(
     let mut index = BTreeMap::new();
     let mut hint = hint.unwrap_or(0);
 
-    reader.seek(SeekFrom::Start(0))?;
+    reader.rewind()?;
 
     loop {
         let offset = match find_next_signature(reader, CD_SIG, Some(hint)) {
             Ok(offset) => offset,
             Err(e) => {
-                if e == ZipError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)) {
-                    return Ok(index);
+                return if e == ZipError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)) {
+                    Ok(index)
                 } else {
-                    return Err(e);
+                    Err(e)
                 }
             }
         };
 
         let header = parse_central_dir(reader, offset)?;
-        hint = hint + header.len;
+        hint += header.len;
         index.insert(header.filename.clone(), header);
     }
 }
@@ -311,12 +307,11 @@ pub fn intensive_index_archive<R: Read + Seek>(
     reader: &mut BufReader<R>,
 ) -> Result<BTreeMap<PathBuf, ZipEntry>> {
     let mut lh_index = BTreeMap::new();
-    let cd_index;
 
-    reader.seek(SeekFrom::Start(0))?;
+    reader.rewind()?;
 
     // Try to index by central directory first
-    cd_index = index_archive(reader, None)?;
+    let cd_index = index_archive(reader, None)?;
 
     // Now try to index by local file headers, this is against the spec
     // and has a somewhat high chance of false positives.
@@ -406,7 +401,7 @@ impl<R: Read + Seek> ZipReader<R> {
     pub fn file_info<T: AsRef<Path>>(&self, filename: &T) -> Result<ZipEntryInfo> {
         let entry = self.index.get(filename.as_ref())
             .ok_or(ZipError::EntryNotFound(filename.as_ref().into()))?;
-        Ok(ZipEntryInfo::from_central_dir(&entry))
+        Ok(ZipEntryInfo::from_central_dir(entry))
     }
 
     /// Extract a file from the archive.
@@ -417,14 +412,14 @@ impl<R: Read + Seek> ZipReader<R> {
             return Err(ZipError::MismatchedCompressionMethod(entry.compression, codec.int_id()));
         }
         let data = dump_file(&mut self.reader, entry)?;
-        codec.expand(&data)
+        codec.expand((&data, data.len()))
     }
 
 
     /// Extract the files to the given directory.
     pub fn extract_files<T: AsRef<Path>>(&mut self, files: &[T], dir: &T, codec: &mut impl CompressionCodec) -> Result<()> {
         let mut central_dirs = Vec::with_capacity(files.len());
-        let mut dir = dir.clone().as_ref().to_owned();
+        let dir = dir.as_ref().to_owned();
         for file in files {
             let cd = self.index.get(file.as_ref())
                 .ok_or(ZipError::EntryNotFound(file.as_ref().into()))?;
@@ -448,7 +443,7 @@ impl<R: Read + Seek> ZipReader<R> {
             }).collect::<Result<Vec<Vec<u8>>>>()?;
 
             slices.into_par_iter().zip(central_dirs).for_each(|(data_raw, cd)| {
-                let data = codec.expand(&data_raw).unwrap();
+                let data = codec.expand((&data_raw, data_raw.len())).unwrap();
                 let mut path = dir.clone();
                 path.push(cd.filename.clone());
                 let mut file = File::create(path).unwrap();

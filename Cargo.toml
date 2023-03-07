@@ -19,8 +19,8 @@ lto = true
 
 [dependencies]
 thiserror = "1.0.36"
-byteorder = "1.4.3"
 crc = "3.0.0"
+neoncore = "1.0.0"
 
 [dependencies.rayon]
 version = "1.6"

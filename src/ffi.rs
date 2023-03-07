@@ -22,6 +22,7 @@
 
 
 use std::io::{Cursor};
+use std::path::{Path, PathBuf};
 
 use std::ptr::{null, null_mut};
 
@@ -48,12 +49,15 @@ pub struct IZipEntry {
     offset: u64,
 }
 
+/// # General usage
 /// Opens a zip file from a buffer passed in from C.
 /// The buffer is converted to a slice and then to a SeekableCursor.
 /// The cursor is then passed to ZipReader::new.
 /// If the reader is successfully created, it is boxed and a pointer to it is returned.
 /// If the reader is not successfully created, an IZipReader is created with the error field set.
 /// The C code can the use the C helper function to get the error.
+/// # Safety
+/// This function presents an interface to C code, but is using the safe internal API.
 #[no_mangle]
 pub unsafe extern "C" fn zip_open_buffer(buf: &mut c_uchar, buf_len: size_t) -> *mut IZipReader {
     // Convert the buffer to a slice
@@ -73,6 +77,13 @@ pub unsafe extern "C" fn zip_open_buffer(buf: &mut c_uchar, buf_len: size_t) -> 
     Box::leak(reader)
 }
 
+/// # General usage
+/// Gets the file info from a ZipReader.
+/// The filename is converted to a PathBuf and passed to ZipReader::file_info.
+/// If the file info is successfully retrieved, it is boxed and a pointer to it is returned.
+/// If the file info is not successfully retrieved, a null pointer is returned.
+/// # Safety
+/// This function presents an interface to C code, but is using the safe internal API.
 #[no_mangle]
 pub unsafe extern "C" fn zip_find_file(reader: *mut IZipReader, filename: *const c_uchar, filename_len: size_t) -> *mut ZipEntryInfo {
     let reader = if !reader.is_null() {
@@ -86,11 +97,17 @@ pub unsafe extern "C" fn zip_find_file(reader: *mut IZipReader, filename: *const
     let filename = std::str::from_utf8(filename).unwrap();
 
     if let Some(reader) = &mut reader.reader {
-        let finfo = Box::new(reader.file_info(filename).unwrap());
-        Box::leak(finfo)
+        let fname = PathBuf::from(filename);
+        let info = Box::new(reader.file_info(&fname).unwrap());
+        Box::leak(info)
     } else { null_mut() }
 }
 
+/// # General usage
+/// Close an IZipReader.
+/// The reader is boxed and then dropped.
+/// # Safety
+/// This function presents an interface to C code, but is using the safe internal API.
 #[no_mangle]
 pub unsafe extern "C" fn zip_close(reader: *mut IZipReader) {
     let reader = if !reader.is_null() {
@@ -101,6 +118,10 @@ pub unsafe extern "C" fn zip_close(reader: *mut IZipReader) {
     drop(reader);
 }
 
+/// # General usage
+/// Gets an error from an IZipReader if one exists, otherwise returns null.
+/// # Safety
+/// This function presents an interface to C code, but is using the safe internal API.
 #[no_mangle]
 #[inline]
 pub unsafe extern "C" fn zip_get_error(reader: *const IZipReader) -> *const ZipError {
@@ -122,6 +143,8 @@ pub unsafe extern "C" fn zip_get_error(reader: *const IZipReader) -> *const ZipE
 /// If the message is successfully copied, the function returns the size of the message.
 ///
 /// On error the function returns u32::MAX.
+/// # Safety
+/// This function presents an interface to C code, but is using the safe internal API.
 #[no_mangle]
 #[inline]
 pub unsafe extern "C" fn zip_error_get_message(error: *const ZipError, out_buf: *mut c_char, out_max: usize) -> usize {
@@ -142,5 +165,5 @@ pub unsafe extern "C" fn zip_error_get_message(error: *const ZipError, out_buf: 
         out_buf[i] = *b as c_char;
     }
 
-    return out_max;
+    out_max
 }
