@@ -16,24 +16,104 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::collections::{BTreeMap};
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
 use neoncore::int_util::Endianness::LittleEndian;
 use neoncore::int_util::StreamReadInt;
 #[cfg(feature = "multi-thread")]
 use rayon::prelude::*;
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
-use crate::{CD_SIG, EOCD_SIG, LFH_SIG, Result, ZipError};
 use crate::compression_codecs::CompressionCodec;
-use crate::structures::{CentralDirectory, EndOfCentralDirectory, LocalFileHeader, ZipEntry};
+use crate::structures::{CentralDirectory, EndOfCentralDirectory, EndOfCentralDirectory64, LocalFileHeader, ZipEntry};
+use crate::{Result, ZipError, CD_SIG, EOCD_SIG, LFH_SIG, EOCD64_SIG};
 
-pub type ZipIndex = BTreeMap<PathBuf, CentralDirectory>;
+pub struct ZipIndex(BTreeMap<PathBuf, CentralDirectory>);
+
+impl ZipIndex {
+    pub fn new(map: BTreeMap<PathBuf, CentralDirectory>) -> Self {
+        ZipIndex(map)
+    }
+
+    pub fn files(&self) -> impl Iterator<Item = &CentralDirectory> {
+        self.0.iter().filter_map(
+            |(_path, info)| {
+                if !info.is_directory {
+                    Some(info)
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
+    pub fn dirs(&self) -> impl Iterator<Item = &CentralDirectory> {
+        self.0.iter().filter_map(
+            |(_path, info)| {
+                if info.is_directory {
+                    Some(info)
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
+    pub fn get(&self, path: &Path) -> Option<&CentralDirectory> {
+        self.0.get(path)
+    }
+
+    pub fn insert(&mut self, path: PathBuf, info: CentralDirectory) -> Option<CentralDirectory> {
+        self.0.insert(path, info)
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        self.0.contains_key(path)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Path, &CentralDirectory)> {
+        self.0.iter().map(|(path, info)| (path.as_path(), info))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &Path> {
+        self.0.keys().map(|path| path.as_path())
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &CentralDirectory> {
+        self.0.values()
+    }
+
+    pub fn into_keys(self) -> impl Iterator<Item = PathBuf> {
+        self.0.into_keys()
+    }
+
+    pub fn into_values(self) -> impl Iterator<Item = CentralDirectory> {
+        self.0.into_values()
+    }
+}
+
+impl IntoIterator for ZipIndex {
+    type Item = (PathBuf, CentralDirectory);
+    type IntoIter = std::collections::btree_map::IntoIter<PathBuf, CentralDirectory>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
 
 pub struct ZipReader<R: Read + Seek> {
     reader: BufReader<R>,
     index: ZipIndex,
+    is_zip64: bool,
 }
 
 pub struct ZipEntryInfo {
@@ -77,35 +157,50 @@ fn find_next_signature<R: Read + Seek>(
     signature: u32,
     hint: Option<u64>,
 ) -> Result<u64> {
-    let mut lower = [0u8; 2];
-    let mut top = [0u8; 2];
     let offset;
     let start_pos = reader.stream_position()?;
+    // Split the signature into top and bottom u16s
+    let sig_lower = (signature & 0x0000FFFF) as u16;
+    let sig_upper = ((signature & 0xFFFF0000) >> 16) as u16;
+    let sig_fbyte = (signature & 0x000000FF) as u8;
 
     if let Some(hint) = hint {
         reader.seek(SeekFrom::Start(hint))?;
     }
 
+    // Scan byte by byte until we find the first byte of the signature
     loop {
-        // Look for the lower 2 bytes of the signature first
-        reader.read_exact(&mut lower)?;
-        if lower == signature.to_le_bytes()[..2] {
-            // If we found it, look for the top 2 bytes
-            reader.read_exact(&mut top)?;
-            if top == signature.to_le_bytes()[2..] {
-                offset = reader.stream_position()? - 4;
-                // Rewind to the start position
-                reader.seek(SeekFrom::Start(start_pos))?;
-                return Ok(offset);
+        let mut byte = [0u8];
+        let mut next_byte = [0u8];
+        reader.read_exact(&mut byte)?;
+        if byte[0] == sig_fbyte {
+            // If the first byte matches, read the next byte and check if it matches the lower
+            // u16 of the signature
+            reader.read_exact(&mut next_byte)?;
+            let lower = ((next_byte[0] as u16) << 8) | byte[0] as u16;
+            if lower == sig_lower {
+                // get the upper u16 of the signature candidate
+                let upper = reader.read_u16(LittleEndian)?;
+                if upper == sig_upper {
+                    // If the upper u16 matches, we found the signature
+                    offset = reader.stream_position()? - 4;
+                    break;
+                }
             }
         }
     }
+
+    // Rewind the reader to the original position
+    reader.seek(SeekFrom::Start(start_pos))?;
+    Ok(offset)
 }
 
 fn find_eocd<T: Read + Seek>(data: &mut BufReader<T>) -> Result<EndOfCentralDirectory> {
     let eocd: Option<EndOfCentralDirectory>;
-
-    let offset = find_next_signature(data, EOCD_SIG, None)?;
+    let offset = match find_next_signature(data, EOCD_SIG, None) {
+        Ok(offset) => offset,
+        Err(_) => return Err(ZipError::EndOfCentralDirectoryNotFound),
+    };
     data.seek(SeekFrom::Start(offset))?;
     let sig_candidate = data.read_u32(LittleEndian)?;
 
@@ -173,7 +268,7 @@ fn parse_central_dir<T: Read + Seek>(
         buf
     };
     let len = data.stream_position()? - offset;
-    let is_directory = compressed_size == 0 && uncompressed_size == 0;
+    let is_directory = uncompressed_size == 0;
 
     Ok(CentralDirectory {
         offset,
@@ -200,10 +295,7 @@ fn parse_central_dir<T: Read + Seek>(
 
 /// Parse a local file header.
 /// the offset is relative to the start of the file.
-fn parse_header<T: Read + Seek>(
-    data: &mut BufReader<T>,
-    offset: u64,
-) -> Result<LocalFileHeader> {
+fn parse_header<T: Read + Seek>(data: &mut BufReader<T>, offset: u64) -> Result<LocalFileHeader> {
     // Rewind the reader
     data.seek(SeekFrom::Start(offset))?;
 
@@ -225,9 +317,9 @@ fn parse_header<T: Read + Seek>(
         let compression = data.read_u16(LittleEndian)?;
         let last_mod_time = data.read_u16(LittleEndian)?;
         let last_mod_date = data.read_u16(LittleEndian)?;
-        let mut crc32 = !0;
-        let mut compressed_size = !0;
-        let mut uncompressed_size = !0;
+        let mut crc32 = 0;
+        let mut compressed_size = 0;
+        let mut uncompressed_size = 0;
         // Do we need to look for the data descriptor?
         if flags & 1 << 3 == 0 {
             crc32 = data.read_u32(LittleEndian)?;
@@ -280,11 +372,13 @@ pub fn index_archive<R: Read + Seek>(
         let offset = match find_next_signature(reader, CD_SIG, Some(hint)) {
             Ok(offset) => offset,
             Err(e) => {
-                return if e == ZipError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)) {
-                    Ok(index)
+                return if e
+                    == ZipError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+                {
+                    Ok(ZipIndex::new(index))
                 } else {
                     Err(e)
-                }
+                };
             }
         };
 
@@ -294,68 +388,18 @@ pub fn index_archive<R: Read + Seek>(
     }
 }
 
-/// Index the archive forcibly.
-///
-/// This can be used to try to forcibly index a corrupt archive,
-/// however it is not guaranteed to work, thus you should 
-/// not rely on unwrapping the result.
-///
-/// This method MUST ONLY be used as a last resort.
-///
-///
-pub fn intensive_index_archive<R: Read + Seek>(
-    reader: &mut BufReader<R>,
-) -> Result<BTreeMap<PathBuf, ZipEntry>> {
-    let mut lh_index = BTreeMap::new();
-
-    reader.rewind()?;
-
-    // Try to index by central directory first
-    let cd_index = index_archive(reader, None)?;
-
-    // Now try to index by local file headers, this is against the spec
-    // and has a somewhat high chance of false positives.
-    loop {
-        let offset = match find_next_signature(reader, LFH_SIG, None) {
-            Ok(offset) => offset,
-            Err(e) => {
-                if e == ZipError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)) {
-                    break;
-                } else {
-                    return Err(e);
-                }
-            }
-        };
-
-        let header = parse_header(reader, offset)?;
-        lh_index.insert(header.filename.clone(), header);
-    }
-
-    // Now we have two indexes, we need to merge them.
-    let mut index = BTreeMap::new();
-    for (filename, cd_header) in cd_index {
-        index.insert(filename.clone(), ZipEntry::CentralDirectory(cd_header));
-    }
-
-    for (filename, lh_header) in lh_index {
-        if index.contains_key(&filename) {
-            continue;
-        }
-
-        index.insert(filename.clone(), ZipEntry::LocalFileHeader(lh_header));
-    }
-
-    Ok(index)
-}
-
 /// Dump the file as it's stored in the zip file.
 pub fn dump_file<T: Read + Seek>(
     data: &mut BufReader<T>,
-    CentralDirectory { local_header_rel_offset: relative_offset_of_local_header, compressed_size, .. }: &CentralDirectory,
+    CentralDirectory {
+        local_header_rel_offset,
+        compressed_size,
+        ..
+    }: &CentralDirectory,
 ) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; *compressed_size as usize];
-    data.seek(SeekFrom::Start(*relative_offset_of_local_header as u64))?;
-    let header = parse_header(data, *relative_offset_of_local_header as u64)?;
+    data.seek(SeekFrom::Start(*local_header_rel_offset as u64))?;
+    let header = parse_header(data, *local_header_rel_offset as u64)?;
     data.seek(SeekFrom::Start(header.data_offset))?;
     data.read_exact(&mut buf)?;
     Ok(buf)
@@ -364,10 +408,53 @@ pub fn dump_file<T: Read + Seek>(
 /// Get the local file header for a file from a central directory entry.
 pub fn get_local_file_header<T: Read + Seek>(
     data: &mut BufReader<T>,
-    CentralDirectory { local_header_rel_offset: relative_offset_of_local_header, .. }: &CentralDirectory,
+    CentralDirectory {
+        local_header_rel_offset: relative_offset_of_local_header,
+        ..
+    }: &CentralDirectory,
 ) -> Result<LocalFileHeader> {
     data.seek(SeekFrom::Start(*relative_offset_of_local_header as u64))?;
     parse_header(data, *relative_offset_of_local_header as u64)
+}
+
+/// Extract a file from `reader` to `where_to` using `codec` and the info in `cd`.
+pub fn extract_file<R, P>(
+    reader: &mut R,
+    cd: &CentralDirectory,
+    where_to: P,
+    codec: &mut impl CompressionCodec,
+) -> Result<()>
+where
+    R: Read + Seek,
+    P: AsRef<Path>,
+{
+    let mut reader = BufReader::new(reader);
+    let where_to = where_to.as_ref();
+    let dest_path = where_to.join(&cd.filename);
+    if !where_to.exists() {
+        return Err(ZipError::IOError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Destination path does not exist",
+        )));
+    }
+
+    if dest_path.exists() {
+        return Err(ZipError::IOError(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "File already exists",
+        )));
+    }
+
+    let mut file = File::create(&dest_path)?;
+
+    if codec.int_id() != cd.compression {
+        return Err(ZipError::MismatchedCompressionMethod(
+            cd.compression,
+            codec.int_id(),
+        ));
+    }
+    codec.streamed_expansion(&mut reader, &mut file);
+    Ok(())
 }
 
 impl<R: Read + Seek> ZipReader<R> {
@@ -375,22 +462,26 @@ impl<R: Read + Seek> ZipReader<R> {
     pub fn new(reader: R) -> Result<ZipReader<R>> {
         let mut reader = BufReader::new(reader);
         let eocd = find_eocd(&mut reader)?;
+        let index = index_archive(
+            &mut reader,
+            Some(eocd.offset_of_start_of_central_directory as u64),
+        )?;
 
-        let index = index_archive(&mut reader,
-                                  Some(eocd.offset_of_start_of_central_directory as u64))?;
-
-
-        Ok(ZipReader {
-            reader,
-            index,
-        })
+        Ok(ZipReader { reader, index, is_zip64: false })
     }
 
     /// Dump a file from the archive, without decompressing it.
     pub fn dump_file<T: AsRef<Path>>(&mut self, filename: &T) -> Result<Vec<u8>> {
-        let entry = self.index.get(filename.as_ref())
+        let entry = self
+            .index
+            .get(filename.as_ref())
             .ok_or(ZipError::EntryNotFound(filename.as_ref().into()))?;
         dump_file(&mut self.reader, entry)
+    }
+
+    /// Dump a file from the archive, without decompressing it from a central directory entry.
+    pub fn dump_file_from_cd(&mut self, cd: &CentralDirectory) -> Result<Vec<u8>> {
+        dump_file(&mut self.reader, cd)
     }
 
     /// Get the index of the archive.
@@ -399,58 +490,106 @@ impl<R: Read + Seek> ZipReader<R> {
     }
 
     pub fn file_info<T: AsRef<Path>>(&self, filename: &T) -> Result<ZipEntryInfo> {
-        let entry = self.index.get(filename.as_ref())
+        let entry = self
+            .index
+            .get(filename.as_ref())
             .ok_or(ZipError::EntryNotFound(filename.as_ref().into()))?;
         Ok(ZipEntryInfo::from_central_dir(entry))
     }
 
     /// Extract a file from the archive.
-    pub fn extract_file<T: AsRef<Path>>(&mut self, filename: &T, codec: &mut impl CompressionCodec) -> Result<Vec<u8>> {
-        let entry = self.index.get(filename.as_ref())
-            .ok_or(ZipError::EntryNotFound(filename.as_ref().into()))?;
-        if entry.compression != codec.int_id() {
-            return Err(ZipError::MismatchedCompressionMethod(entry.compression, codec.int_id()));
+    pub fn extract_file<T: AsRef<Path>>(
+        &mut self,
+        filename: &T,
+        codec: &mut impl CompressionCodec,
+    ) -> Result<Vec<u8>> {
+        let entry = self
+            .index
+            .get(filename.as_ref())
+            .ok_or(ZipError::EntryNotFound(filename.as_ref().into()))?
+            .clone();
+        self.extract_data_from_cd(&entry, codec)
+    }
+
+    /// Internal function to extract data from a central directory entry.
+    /// This is used by `extract_file` and `extract_all_files`.
+    fn extract_data_from_cd(
+        &mut self,
+        cd: &CentralDirectory,
+        codec: &mut impl CompressionCodec,
+    ) -> Result<Vec<u8>> {
+        if cd.compression != codec.int_id() {
+            return Err(ZipError::MismatchedCompressionMethod(
+                cd.compression,
+                codec.int_id(),
+            ));
         }
-        let data = dump_file(&mut self.reader, entry)?;
+        let data = dump_file(&mut self.reader, cd)?;
         codec.expand((&data, data.len()))
     }
 
-
-    /// Extract the files to the given directory.
-    pub fn extract_files<T: AsRef<Path>>(&mut self, files: &[T], dir: &T, codec: &mut impl CompressionCodec) -> Result<()> {
-        let mut central_dirs = Vec::with_capacity(files.len());
-        let dir = dir.as_ref().to_owned();
+    /// Extract all files to the given directory.
+    pub fn extract_all_files<T: AsRef<Path>>(
+        &mut self,
+        dir: &T,
+        codec: &mut impl CompressionCodec,
+    ) -> Result<()> {
+        let files = self
+            .index
+            .files()
+            .cloned()
+            .collect::<Vec<CentralDirectory>>();
+        self.build_directories(dir)?;
         for file in files {
-            let cd = self.index.get(file.as_ref())
-                .ok_or(ZipError::EntryNotFound(file.as_ref().into()))?;
-            central_dirs.push(cd);
-        }
-
-        #[cfg(not(feature = "multi-thread"))]
-        for cd in central_dirs.iter() {
-            let data_raw = dump_file(&mut self.reader, cd)?;
-            let data = codec.expand(&data_raw)?;
-            let mut path = dir.clone();
-            path.push(cd.filename.clone());
-            let mut file = File::create(path)?;
-            file.write_all(&data)?;
-        }
-
-        #[cfg(feature = "multi-thread")]
-        {
-            let slices = central_dirs.iter().map(|cd| {
-                dump_file(&mut self.reader, cd)
-            }).collect::<Result<Vec<Vec<u8>>>>()?;
-
-            slices.into_par_iter().zip(central_dirs).for_each(|(data_raw, cd)| {
-                let data = codec.expand((&data_raw, data_raw.len())).unwrap();
-                let mut path = dir.clone();
-                path.push(cd.filename.clone());
-                let mut file = File::create(path).unwrap();
-                file.write_all(&data).unwrap();
-            });
+            extract_file(&mut self.reader, &file, dir, codec)?;
         }
 
         Ok(())
+    }
+
+    fn build_directories<T: AsRef<Path>>(&mut self, base: &T) -> Result<()> {
+        let dirs = self
+            .index
+            .dirs()
+            .cloned()
+            .collect::<Vec<CentralDirectory>>();
+        for dir in dirs {
+            let mut path = base.as_ref().to_path_buf();
+            path.push(&dir.filename);
+            std::fs::create_dir_all(path)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Test that we can find the EOCD signature. when it's aligned, this is the best case scenario.
+    #[test]
+    fn test_find_sig_aligned() {
+        // Generated by wxHexEditor //
+        let data: [u8; 168] = [
+            0x00, 0x2F, 0x6D, 0x61, 0x78, 0x5F, 0x73, 0x69, 0x7A, 0x65, 0x2E, 0x72, 0x73, 0x55,
+            0x54, 0x05, 0x00, 0x01, 0xA9, 0xBA, 0xEE, 0x63, 0x50, 0x4B, 0x01, 0x02, 0x00, 0x00,
+            0x0A, 0x00, 0x00, 0x00, 0x08, 0x00, 0xC8, 0x7A, 0x50, 0x56, 0xDB, 0x87, 0xEE, 0xBA,
+            0x1A, 0x02, 0x00, 0x00, 0x8C, 0x09, 0x00, 0x00, 0x1D, 0x00, 0x09, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF5, 0xEC, 0x00, 0x00, 0x70, 0x6F,
+            0x73, 0x74, 0x63, 0x61, 0x72, 0x64, 0x2D, 0x6D, 0x61, 0x69, 0x6E, 0x2F, 0x74, 0x65,
+            0x73, 0x74, 0x73, 0x2F, 0x73, 0x63, 0x68, 0x65, 0x6D, 0x61, 0x2E, 0x72, 0x73, 0x55,
+            0x54, 0x05, 0x00, 0x01, 0xA9, 0xBA, 0xEE, 0x63, 0x50, 0x4B, 0x05, 0x06, 0x00, 0x00,
+            0x00, 0x00, 0x2C, 0x00, 0x2C, 0x00, 0x82, 0x0E, 0x00, 0x00, 0x53, 0xEF, 0x00, 0x00,
+            0x28, 0x00, 0x61, 0x31, 0x63, 0x33, 0x61, 0x66, 0x34, 0x37, 0x61, 0x65, 0x63, 0x34,
+            0x33, 0x33, 0x61, 0x34, 0x30, 0x30, 0x62, 0x39, 0x38, 0x37, 0x31, 0x38, 0x64, 0x36,
+            0x37, 0x65, 0x32, 0x62, 0x38, 0x38, 0x33, 0x61, 0x36, 0x36, 0x38, 0x64, 0x37, 0x37,
+        ];
+
+        let mut reader = Cursor::new(data);
+        let mut buf_reader = BufReader::new(&mut reader);
+        let eocd = find_next_signature(&mut buf_reader, EOCD_SIG, None).unwrap();
+        println!("EOCD: {}", eocd);
+        assert_eq!(eocd, 0x6A);
     }
 }

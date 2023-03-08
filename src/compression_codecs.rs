@@ -1,5 +1,5 @@
-use std::io::{BufRead, Read, Write};
 use crate::Result;
+use std::io::{BufRead, Read, Write};
 
 pub type MemoryStream<'stream> = (&'stream Vec<u8>, usize);
 

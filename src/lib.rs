@@ -15,20 +15,19 @@
    You should have received a copy of the GNU Lesser General Public License
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::path::PathBuf;
 use thiserror::Error;
 
-pub mod structures;
+pub mod codecs;
 pub mod compression_codecs;
-pub mod reader;
-pub mod writer;
 #[cfg(feature = "ffi")]
 pub mod ffi;
-pub mod codecs;
+pub mod reader;
+pub mod structures;
+pub mod writer;
 
 pub const EOCD_SIG: u32 = 0x06054b50;
 pub const EOCD64_SIG: u32 = 0x06064b50;
@@ -44,7 +43,7 @@ pub enum ZipError {
     InvalidSignature(u32),
     #[error("Entry not found: {0}")]
     EntryNotFound(PathBuf),
-    #[error("Invalid zip file")]
+    #[error("Could not find end of central directory for the stream")]
     EndOfCentralDirectoryNotFound,
     #[error("Invalid entry in archive at offset {0}")]
     InvalidEntry(u64),
@@ -60,12 +59,31 @@ pub enum ZipError {
     UnknownError(u64, String),
 }
 
+impl ZipError {
+    pub fn error_code(&self) -> u16 {
+        match self {
+            ZipError::IOError(_) => 1,
+            ZipError::InvalidSignature(_) => 2,
+            ZipError::EntryNotFound(_) => 3,
+            ZipError::EndOfCentralDirectoryNotFound => 4,
+            ZipError::InvalidEntry(_) => 5,
+            ZipError::InvalidCompressionMethod(_) => 6,
+            ZipError::MismatchedCompressionMethod(_, _) => 7,
+            ZipError::InvalidCompressionLevel(_) => 8,
+            ZipError::InvalidUtf8String(_) => 9,
+            ZipError::UnknownError(_, _) => !0,
+        }
+    }
+}
+
 impl PartialEq for ZipError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (ZipError::IOError(a), ZipError::IOError(b)) => a.kind() == b.kind(),
             (ZipError::InvalidSignature(a), ZipError::InvalidSignature(b)) => a == b,
-            (ZipError::EndOfCentralDirectoryNotFound, ZipError::EndOfCentralDirectoryNotFound) => true,
+            (ZipError::EndOfCentralDirectoryNotFound, ZipError::EndOfCentralDirectoryNotFound) => {
+                true
+            }
             (ZipError::InvalidEntry(a), ZipError::InvalidEntry(b)) => a == b,
             (ZipError::UnknownError(a, b), ZipError::UnknownError(c, d)) => a == c && b == d,
             _ => false,
@@ -82,6 +100,4 @@ pub struct ZipObject {
 }
 
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}

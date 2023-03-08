@@ -1,7 +1,7 @@
-use std::io::{BufRead, BufReader, Read, Write};
-use zstd::Decoder;
 use crate::compression_codecs::{CompressionCodec, MemoryStream};
 use crate::{Result, ZipError};
+use std::io::{BufRead, BufReader, Read, Write};
+use zstd::Decoder;
 
 pub struct ZstdCodec {
     pub level: i32,
@@ -17,7 +17,6 @@ impl ZstdCodec {
 }
 
 impl CompressionCodec for ZstdCodec {
-
     fn int_id(&self) -> u16 {
         0
     }
@@ -29,8 +28,8 @@ impl CompressionCodec for ZstdCodec {
     }
 
     fn expand(&self, data: MemoryStream) -> Result<Vec<u8>> {
-        let mut cursor = std::io::Cursor::new(data.0);
-        let mut data_reader = BufReader::new(cursor);
+        let cursor = std::io::Cursor::new(data.0);
+        let data_reader = BufReader::new(cursor);
         let mut buf = Vec::with_capacity(data.1);
         let mut decoder = zstd::Decoder::new(data_reader)?;
         decoder.read_exact(&mut buf)?;
